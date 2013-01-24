@@ -52,6 +52,8 @@ test tcs xs = NonNil (test' tcs xs)
 test' :: Ord r => [a -> r] -> [a] -> TestTree' a
 test' [] _ =
   error "Test.QuickSpec.TestTree.test': ran out of test cases"
+test' _ [x] = t
+  where t = Tree { rep = x, rest = [], branches = [t] }
 test' (tc:tcs) xs = tree xs tc (map (test' tcs) bs)
   where bs = partitionBy tc xs
 
@@ -72,6 +74,7 @@ cutOff :: Int -> Int -> TestTree a -> TestResults a
 cutOff _ _ Nil = Results Nil
 cutOff m n (NonNil t) = Results (NonNil (aux m t))
   where aux 0 t = aux' False n n t
+        aux _ Tree { rep = x, rest = [] } = Tree x [] []
         aux m t = t { branches = map (aux (m-1)) (branches t) }
         -- Exponential backoff if we carry on refining a class
         aux' True 0 n t = t { branches = map (aux' False (n*2-1) (n*2)) (branches t) }
