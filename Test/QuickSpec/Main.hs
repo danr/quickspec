@@ -1,14 +1,16 @@
 -- | The main implementation of QuickSpec.
 
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeOperators, TupleSections, ScopedTypeVariables #-}
 module Test.QuickSpec.Main where
 
 import Test.QuickSpec.Generate
 import Test.QuickSpec.Reasoning.NaiveEquationalReasoning hiding (universe, maxDepth)
 import Test.QuickSpec.Utils.Typed
 import qualified Test.QuickSpec.Utils.TypeMap as TypeMap
+import qualified Test.QuickSpec.Utils.TypeRel as TypeRel
 import Test.QuickSpec.Signature hiding (vars)
 import Test.QuickSpec.Term
+import Test.QuickSpec.Family
 import Control.Monad
 import Text.Printf
 import Data.Monoid
@@ -19,6 +21,9 @@ import Data.Monoid
 import Data.Maybe
 import Test.QuickSpec.Utils
 import Test.QuickSpec.Equation
+import Data.Ord
+import Data.Function
+import Test.QuickSpec.Utils.Typeable
 
 undefinedsSig :: Sig -> Sig
 undefinedsSig sig =
@@ -26,24 +31,38 @@ undefinedsSig sig =
     [ undefinedSig "undefined" (undefined `asTypeOf` witness x)
     | Some x <- saturatedTypes sig ]
 
-universe :: [[Tagged Term]] -> [Tagged Term]
-universe css = filter (not . isUndefined . erase) (concat css)
+limitVars :: Int -> Sig -> Sig
+limitVars n sig = sig { variables = TypeMap.mapValues (O . take n . unO) (variables sig) }
 
-prune :: Int -> [Tagged Term] -> [Term] -> [Equation] -> [Equation]
-prune d univ reps eqs = evalEQ (initial d univ) (filterM (fmap not . provable) eqs)
+data SkeletalEq a
+  = RepRenaming (Family a)
+  | Normal (Family a) (Family a) -- non-representative first
+
+skeletalBound :: SkeletalEq a -> Term
+skeletalBound (RepRenaming t) = term t
+skeletalBound (Normal t u) = term t
+
+skeletal :: [Family a] -> [SkeletalEq a]
+skeletal (t:ts) = RepRenaming t:[Normal u t | u <- ts]
+
+prune :: Sig -> [(StdGen, Int)] -> [Tagged Term] -> [Some SkeletalEq] -> [Equation]
+prune sig seeds univ skels =
+  concat (evalEQ (initial (maxDepth sig) univ) (mapM (some prune1) skels))
   where
-    provable (t :=: u) = do
-      res <- t =?= u
-      if res then return True else do
-        state <- get
-        -- Check that we won't unify two representatives---if we do
-        -- the equation is false
-        t =:= u
-        reps' <- mapM rep reps
-        if sort reps' == usort reps' then return False else do
-          put state
-          return True
-
+    prune1 skel =
+      filterM (fmap not . unify) =<<
+      (fmap retest . weedOut . instantiate $ skel)
+    
+    retest es =
+      equations (map (map (tagged term)) (classes (test' seeds sig es)))
+    
+    weedOut = fmap (map (fst . head) . groupBy ((==) `on` snd) . sortBy (comparing snd)) . mapM withRep . sort
+      where
+        withRep t = fmap (t,) (rep (term t))
+    
+    instantiate (RepRenaming t) = instances t
+    instantiate (Normal t u) = instances t ++ instances u
+    
 defines :: Equation -> Maybe Symbol
 defines (t :=: u) = do
   let isVar Var{} = True
@@ -80,21 +99,22 @@ runTool tool sig_ = do
 
 quickSpec :: Signature a => a -> IO ()
 quickSpec = runTool $ \sig -> do
-  putStrLn "== Testing =="
-  r <- generate sig
-  let clss = eraseClasses r
-      reps = map (erase . head) clss
-      eqs = equations clss
-      univ = universe clss
-  printf "%d raw equations; %d terms in universe.\n\n"
-    (length eqs)
-    (length univ)
+  seeds <- genSeeds
 
-  let pruned = filter (not . all silent . eqnFuns)
-                 (prune (maxDepth sig) univ reps eqs)
+  putStrLn "== Generating universe =="
+  univ <- universe sig seeds
+  printf "%d terms in universe.\n\n" (length univ)
+  
+  putStrLn "== Testing skeletons =="
+  r <- generate sig seeds
+  let clss = concatMap (some2 (map (Some . O) . classes)) (TypeMap.toList r)
+      skel = sortBy (comparing (some skeletalBound)) (concatMap (some2 (map Some . skeletal)) clss)
+      pruned = filter (not . all silent . eqnFuns)
+                 (prune sig seeds univ skel)
       eqnFuns (t :=: u) = funs t ++ funs u
       isGround (t :=: u) = null (vars t) && null (vars u)
       (ground, nonground) = partition isGround pruned
+
   putStrLn "== Ground equations =="
   forM_ (zip [1 :: Int ..] ground) $ \(i, eq) ->
     printf "%3d: %s\n" i (showEquation sig eq)
@@ -120,9 +140,8 @@ sampleList g n xs | n >= length xs = xs
 sampleTerms :: Signature a => a -> IO ()
 sampleTerms = runTool $ \sig -> do
   putStrLn "== Testing =="
-  r <- generate (updateDepth (maxDepth sig - 1) sig)
-  let univ = sort . concatMap (some2 (map term)) . TypeMap.toList . terms sig .
-             TypeMap.mapValues2 reps $ r
+  seeds <- genSeeds
+  univ <- fmap (map erase) (universe sig seeds)
   printf "Universe contains %d terms.\n\n" (length univ)
 
   let numTerms = 100

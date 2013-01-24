@@ -12,6 +12,7 @@ import qualified Test.QuickSpec.Utils.TypeRel as TypeRel
 import Test.QuickSpec.Utils.TypeMap(TypeMap)
 import qualified Test.QuickSpec.Utils.TypeMap as TypeMap
 import Test.QuickSpec.Term
+import Test.QuickSpec.Family
 import Text.Printf
 import Test.QuickSpec.Utils.Typeable
 import Test.QuickSpec.Utils
@@ -19,16 +20,18 @@ import Test.QuickCheck.Gen
 import System.Random
 import Control.Spoon
 import Test.QuickSpec.Utils.MemoValuation
+import Data.List
+import Data.Ord
 
-terms :: Sig -> TypeRel Expr -> TypeRel Expr
+terms :: Sig -> TypeRel Family -> TypeRel Family
 terms sig base =
   TypeMap.fromList
     [ Some (O (terms' sig base w))
     | Some (Witness w) <- usort (saturatedTypes sig ++ variableTypes sig) ]
 
-terms' :: Typeable a => Sig -> TypeRel Expr -> a -> [Expr a]
+terms' :: Typeable a => Sig -> TypeRel Family -> a -> [Family a]
 terms' sig base w =
-  map var (TypeRel.lookup w (variables sig)) ++
+  [ var vs | let vs = TypeRel.lookup w (variables sig), not (null vs) ] ++
   map con (TypeRel.lookup w (constants sig)) ++
   [ app f x
   | Some (Witness w') <- lhsWitnesses sig w,
@@ -39,10 +42,10 @@ terms' sig base w =
     not (isUndefined (term f)) ]
 
 test :: [(StdGen, Int)] -> Sig ->
-        TypeMap (List `O` Expr) -> TypeMap (TestResults `O` Expr)
+        TypeMap (List `O` Family) -> TypeMap (TestResults `O` Family)
 test seeds sig ts = fmap (mapSome2 (test' seeds sig)) ts
 
-test' :: forall a. Typeable a => [(StdGen, Int)] -> Sig -> [Expr a] -> TestResults (Expr a)
+test' :: forall a. Typeable a => [(StdGen, Int)] -> Sig -> [Family a] -> TestResults (Family a)
 test' seeds sig ts
   | not (testable sig (undefined :: a)) = discrete ts
   | otherwise =
@@ -64,20 +67,19 @@ genSeeds = do
   let rnds rnd = rnd1 : rnds rnd2 where (rnd1, rnd2) = split rnd
   return (zip (rnds rnd) (concat (repeat [0,2..20])))
 
-generate :: Sig -> IO (TypeMap (TestResults `O` Expr))
-generate sig | maxDepth sig < 0 =
+generate :: Sig -> [(StdGen, Int)] -> IO (TypeMap (TestResults `O` Family))
+generate sig seeds | maxDepth sig < 0 =
   error "Test.QuickSpec.Generate.generate: maxDepth must be positive"
-generate sig | maxDepth sig == 0 = return TypeMap.empty
-generate sig = unbuffered $ do
+generate sig seeds | maxDepth sig == 0 = return TypeMap.empty
+generate sig seeds = unbuffered $ do
   let d = maxDepth sig
-  rs <- fmap (TypeMap.mapValues2 reps) (generate (updateDepth (d-1) sig))
+  rs <- fmap (TypeMap.mapValues2 reps) (generate (updateDepth (d-1) sig) seeds)
   printf "Depth %d: " d
   let count :: ([a] -> a) -> (forall b. f (g b) -> a) ->
                TypeMap (f `O` g) -> a
       count op f = op . map (some2 f) . TypeMap.toList
       ts = terms sig rs
   printf "%d terms, " (count sum length ts)
-  seeds <- genSeeds
   let cs = test seeds sig ts
   printf "%d tests, %d classes, %d raw equations.\n"
       (count (maximum . (0:)) numTests cs)
@@ -85,5 +87,16 @@ generate sig = unbuffered $ do
       (count sum (sum . map (subtract 1 . length) . classes) cs)
   return cs
 
-eraseClasses :: TypeMap (TestResults `O` Expr) -> [[Tagged Term]]
+universe :: Sig -> [(StdGen, Int)] -> IO [Tagged Term]
+universe sig seeds = do
+  cs <- generate (updateDepth (maxDepth sig - 1) sig) seeds
+  return $
+    sortBy (comparing erase) .
+    filter (not . isUndefined . erase) .
+    concatMap (some (map (tagged term) . instances)) .
+    TypeRel.toList .
+    terms sig .
+    TypeMap.mapValues2 reps $ cs
+
+eraseClasses :: TypeMap (TestResults `O` Family) -> [[Tagged Term]]
 eraseClasses = concatMap (some (map (map (tagged term)) . classes . unO)) . TypeMap.toList

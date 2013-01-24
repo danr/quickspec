@@ -1,14 +1,14 @@
 -- | Terms and evaluation.
 
-{-# LANGUAGE RankNTypes, ExistentialQuantification, DeriveFunctor #-}
+{-# LANGUAGE DeriveFunctor #-}
 module Test.QuickSpec.Term where
 
 import Test.QuickSpec.Utils.Typeable
-import Test.QuickCheck
 import Data.Function
 import Data.Ord
 import Data.Char
 import Test.QuickSpec.Utils
+import Test.QuickCheck
 
 data Symbol = Symbol {
   index :: Int,
@@ -127,20 +127,6 @@ mapVars f (Var x) = Var (f x)
 mapVars f (Const x) = Const x
 mapVars f (App t u) = App (mapVars f t) (mapVars f u)
 
-data Expr a = Expr {
-  term :: Term,
-  arity :: {-# UNPACK #-} !Int,
-  eval :: (forall b. Variable b -> b) -> a }
-
-instance Eq (Expr a) where
-  (==) = (==) `on` term
-
-instance Ord (Expr a) where
-  compare = comparing term
-
-instance Show (Expr a) where
-  show = show . term
-
 data Atom a = Atom {
   sym :: Symbol,
   value :: a } deriving Functor
@@ -160,14 +146,3 @@ valuation = promote (\(Variable x) -> index (sym x) `variant'` value x)
   where -- work around the fact that split doesn't work
         variant' 0 = variant (0 :: Int)
         variant' n = variant (-1 :: Int) . variant' (n-1)
-
-var :: Variable a -> Expr a
-var v@(Variable (Atom x _)) = Expr (Var x) 0 (\env -> env v)
-
-con :: Constant a -> Expr a
-con (Constant (Atom x v)) = Expr (Const x) (symbolArity x) (const v)
-
-app :: Expr (a -> b) -> Expr a -> Expr b
-app (Expr t a f) (Expr u _ x)
-  | a == 0 = error "Test.QuickSpec.Term.app: oversaturated function"
-  | otherwise = Expr (App t u) (a - 1) (\env -> f env (x env))
